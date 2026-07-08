@@ -1,0 +1,8 @@
+import { useGLTF } from '@react-three/drei'
+
+export function ScannedModel(props) {
+  const { scene } = useGLTF('/models/scene_final.glb')
+  return <primitive object={scene} {...props} />
+}
+
+useGLTF.preload('/models/scene_final.glb')

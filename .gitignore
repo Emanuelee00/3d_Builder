@@ -1,0 +1,34 @@
+# Claude Code local config (non fa parte del progetto)
+.claude/
+
+# Repo COLMAP clonata solo come riferimento/esempi, non e' parte del prodotto
+colmap/
+
+# --- Python pipeline (app/) ---
+app/venv/
+app/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Binari OpenMVS scaricati (troppo pesanti per git, vedi CONTEXT.md per il link)
+app/tools/OpenMVS/
+
+# Output generati dalla pipeline (video/immagini/mesh per singolo job)
+app/output/
+app/uploads/
+app/job-status/
+
+# --- Next.js (webapp/) ---
+webapp/node_modules/
+webapp/.next/
+webapp/out/
+webapp/*.tsbuildinfo
+webapp/.env*.local
+
+# Modelli generati dalle prove utente (teniamo solo lo scene_final.glb di demo)
+webapp/public/models/*
+!webapp/public/models/scene_final.glb
+
+# --- OS ---
+Thumbs.db
+.DS_Store
