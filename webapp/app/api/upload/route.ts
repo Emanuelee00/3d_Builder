@@ -3,16 +3,21 @@ import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { startJob } from "@/lib/jobs";
+import { corsPreflight, withCors } from "@/lib/cors";
 
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
 const UPLOADS_DIR = path.join(PROJECT_ROOT, "app", "uploads");
+
+export async function OPTIONS() {
+  return corsPreflight();
+}
 
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
   const file = formData.get("video");
 
   if (!file || !(file instanceof Blob)) {
-    return NextResponse.json({ error: "Nessun video ricevuto" }, { status: 400 });
+    return withCors(NextResponse.json({ error: "Nessun video ricevuto" }, { status: 400 }));
   }
 
   const jobId = randomUUID();
@@ -24,5 +29,5 @@ export async function POST(req: NextRequest) {
 
   startJob(jobId, videoPath);
 
-  return NextResponse.json({ jobId });
+  return withCors(NextResponse.json({ jobId }));
 }

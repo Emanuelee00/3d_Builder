@@ -5,6 +5,11 @@ import { ModelViewer } from "@/components/ModelViewer";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
+// Se impostata (es. su Vercel), le richieste vanno al PC locale che esegue
+// davvero la pipeline (es. un URL ngrok). Vuota = usa le API di questo stesso
+// sito (comportamento di sviluppo in locale).
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+
 export default function CapturePage() {
   const [status, setStatus] = useState<Status>("idle");
   const [jobId, setJobId] = useState<string | null>(null);
@@ -24,7 +29,7 @@ export default function CapturePage() {
     formData.append("video", file);
 
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const res = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: formData });
       if (!res.ok) throw new Error("Upload fallito");
       const data = await res.json();
       setJobId(data.jobId);
@@ -39,13 +44,13 @@ export default function CapturePage() {
     if (status !== "processing" || !jobId) return;
 
     pollRef.current = setInterval(async () => {
-      const res = await fetch(`/api/status/${jobId}`);
+      const res = await fetch(`${API_BASE}/api/status/${jobId}`);
       if (!res.ok) return;
       const data = await res.json();
       setLog(data.log ?? "");
 
       if (data.status === "done") {
-        setModelUrl(data.modelUrl);
+        setModelUrl(`${API_BASE}${data.modelUrl}`);
         setStatus("done");
         if (pollRef.current) clearInterval(pollRef.current);
       } else if (data.status === "error") {
