@@ -18,6 +18,12 @@ export type JobStatus = {
   error?: string;
 };
 
+// Video (estratto in frame dalla pipeline) e foto (gia' pronte, uno scatto per
+// immagine) sono due modalita' di input alternative per la stessa pipeline.
+export type JobInput =
+  | { kind: "video"; videoPath: string; frameCount: number }
+  | { kind: "photos"; imagesDir: string; frameCount: number };
+
 function statusPath(jobId: string): string {
   return path.join(JOBS_DIR, `${jobId}.json`);
 }
@@ -33,14 +39,28 @@ export function getJob(jobId: string): JobStatus | undefined {
   return JSON.parse(fs.readFileSync(file, "utf-8"));
 }
 
-export function startJob(jobId: string, videoPath: string, frameCount: number): void {
+// Il codice di uscita da solo ("codice 1") non dice nulla di utile: prova a
+// recuperare l'ultimo messaggio di eccezione Python dal log per mostrare
+// qualcosa di comprensibile invece di un errore generico.
+function extractErrorMessage(log: string, code: number | null): string {
+  const matches = [...log.matchAll(/(?:RuntimeError|ValueError|Exception): (.+)/g)];
+  if (matches.length > 0) {
+    return matches[matches.length - 1][1].trim();
+  }
+  return `Pipeline terminata con codice ${code}`;
+}
+
+export function startJob(jobId: string, input: JobInput): void {
   writeJob(jobId, { status: "processing", log: "" });
 
-  const child = spawn(
-    PYTHON_EXE,
-    ["-u", "-m", "app.pipeline.run_pipeline", videoPath, "--job-name", jobId, "--frames", String(frameCount)],
-    { cwd: PROJECT_ROOT }
-  );
+  const pipelineArgs =
+    input.kind === "video"
+      ? [input.videoPath, "--job-name", jobId, "--frames", String(input.frameCount)]
+      : ["--images-dir", input.imagesDir, "--job-name", jobId, "--frames", String(input.frameCount)];
+
+  const child = spawn(PYTHON_EXE, ["-u", "-m", "app.pipeline.run_pipeline", ...pipelineArgs], {
+    cwd: PROJECT_ROOT,
+  });
 
   child.stdout.on("data", (chunk) => {
     const job = getJob(jobId);
@@ -56,7 +76,7 @@ export function startJob(jobId: string, videoPath: string, frameCount: number): 
     if (!job) return;
 
     if (code !== 0) {
-      writeJob(jobId, { ...job, status: "error", error: `Pipeline terminata con codice ${code}` });
+      writeJob(jobId, { ...job, status: "error", error: extractErrorMessage(job.log, code) });
       return;
     }
 

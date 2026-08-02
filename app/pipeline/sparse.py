@@ -16,6 +16,26 @@ except ImportError:
     pycolmap = None
 
 
+# Sotto questa soglia (assoluta o relativa al totale delle immagini fornite) la point
+# cloud sparsa e' cosi' povera che la fase densa/mesh crasha piu' avanti in modo criptico
+# (es. "invalid PLY file" in OpenMVS) dopo aver gia' speso 1-2 minuti di CPU. Meglio
+# fermarsi subito con un messaggio comprensibile: quasi sempre e' overlap insufficiente
+# tra le viste (video troppo veloce, o foto scattate con angolazioni troppo distanti).
+_MIN_REGISTERED_IMAGES = 3
+_MIN_REGISTERED_RATIO = 0.25
+
+
+def _check_registration_quality(num_registered: int, total_images: int) -> None:
+    if num_registered >= _MIN_REGISTERED_IMAGES and num_registered >= total_images * _MIN_REGISTERED_RATIO:
+        return
+    raise RuntimeError(
+        f"Solo {num_registered} immagini su {total_images} sono state registrate: "
+        "troppo poca sovrapposizione tra le viste per una ricostruzione affidabile. "
+        "Riprova girando piu' lentamente intorno all'oggetto (video) o scattando foto "
+        "piu' ravvicinate tra loro, con buona sovrapposizione (foto)."
+    )
+
+
 def run_sparse_reconstruction(image_dir: Path, workspace_dir: Path) -> Path:
     """SfM sparso: pose delle camere + point cloud sparsa. Gira su CPU."""
     database_path = workspace_dir / "database.db"
@@ -48,6 +68,8 @@ def _run_with_pycolmap(image_dir: Path, database_path: Path, sfm_path: Path) -> 
         )
 
     best_idx = max(reconstructions, key=lambda idx: reconstructions[idx].num_reg_images())
+    total_images = len(list(image_dir.glob("*")))
+    _check_registration_quality(reconstructions[best_idx].num_reg_images(), total_images)
     return sfm_path / str(best_idx)
 
 
@@ -92,4 +114,7 @@ def _run_with_cli(image_dir: Path, database_path: Path, sfm_path: Path) -> Path:
                 return int(line.split(":")[-1].strip())
         return 0
 
-    return max(candidates, key=num_reg_images)
+    best_path = max(candidates, key=num_reg_images)
+    total_images = len(list(image_dir.glob("*")))
+    _check_registration_quality(num_reg_images(best_path), total_images)
+    return best_path

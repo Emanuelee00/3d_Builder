@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ModelViewer } from "@/components/ModelViewer";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
+type CaptureMode = "video" | "photos";
 
 // Se impostata (es. su Vercel), le richieste vanno al PC locale che esegue
 // davvero la pipeline (es. un URL ngrok). Vuota = usa le API di questo stesso
@@ -32,6 +33,12 @@ const FRAME_OPTIONS = [
   { value: 90, label: "Dettagliato", hint: "più lento" },
 ] as const;
 
+// Sotto questa soglia la ricostruzione (SfM) ha troppe poche viste sovrapposte
+// per avere buone probabilita' di riuscita; sopra RECOMMENDED_PHOTOS la qualita'
+// tipicamente non migliora molto oltre.
+const MIN_PHOTOS_TO_SUBMIT = 5;
+const RECOMMENDED_PHOTOS = 20;
+
 // La pipeline stampa "[N/5] descrizione fase" per ognuno dei 5 passaggi: la usiamo
 // per stimare una percentuale di avanzamento senza dover instrumentare il Python.
 function progressFromLog(log: string): number {
@@ -52,6 +59,9 @@ function CameraIcon() {
 
 export default function CapturePage() {
   const [status, setStatus] = useState<Status>("idle");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("video");
+  const [photos, setPhotos] = useState<File[]>([]);
+  const [photoUrls, setPhotoUrls] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -98,20 +108,36 @@ export default function CapturePage() {
     }
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Genera le anteprime delle foto scattate finora e libera la memoria dei blob
+  // quando l'elenco cambia o il componente si smonta.
+  useEffect(() => {
+    const urls = photos.map((file) => URL.createObjectURL(file));
+    setPhotoUrls(urls);
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [photos]);
 
+  function handleAddPhoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Azzera il valore subito: permette di scattare un'altra foto con lo stesso
+    // input senza dover prima "deselezionare" nulla.
+    e.target.value = "";
+    if (!file) return;
+    setPhotos((prev) => [...prev, file]);
+  }
+
+  function removeLastPhoto() {
+    setPhotos((prev) => prev.slice(0, -1));
+  }
+
+  // Upload condiviso da video singolo e foto multiple, con barra di progresso
+  // reale: fetch() non espone il progresso di upload, serve XMLHttpRequest.
+  function uploadAndStart(buildFormData: () => FormData) {
     setStatus("uploading");
     setUploadProgress(0);
     setErrorMsg(null);
 
-    const formData = new FormData();
-    formData.append("video", file);
-    formData.append("frameCount", String(frameCount));
-
-    // fetch() non espone il progresso di upload: serve XMLHttpRequest per
-    // sapere quanti byte del video sono stati effettivamente inviati.
     const xhr = new XMLHttpRequest();
     xhr.upload.addEventListener("progress", (ev) => {
       if (ev.lengthComputable) {
@@ -121,7 +147,7 @@ export default function CapturePage() {
     xhr.addEventListener("load", () => {
       if (xhr.status < 200 || xhr.status >= 300) {
         setStatus("error");
-        setErrorMsg("Errore durante il caricamento del video");
+        setErrorMsg("Errore durante il caricamento");
         return;
       }
       const data = JSON.parse(xhr.responseText);
@@ -131,10 +157,31 @@ export default function CapturePage() {
     });
     xhr.addEventListener("error", () => {
       setStatus("error");
-      setErrorMsg("Errore durante il caricamento del video");
+      setErrorMsg("Errore durante il caricamento");
     });
     xhr.open("POST", `${API_BASE}/api/upload`);
-    xhr.send(formData);
+    xhr.send(buildFormData());
+  }
+
+  function handleVideoFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    uploadAndStart(() => {
+      const formData = new FormData();
+      formData.append("video", file);
+      formData.append("frameCount", String(frameCount));
+      return formData;
+    });
+  }
+
+  function handleSubmitPhotos() {
+    if (photos.length < MIN_PHOTOS_TO_SUBMIT) return;
+    uploadAndStart(() => {
+      const formData = new FormData();
+      photos.forEach((photo) => formData.append("photos", photo));
+      formData.append("frameCount", String(frameCount));
+      return formData;
+    });
   }
 
   function startNewScan() {
@@ -143,6 +190,7 @@ export default function CapturePage() {
     setModelUrl(null);
     setErrorMsg(null);
     setLog("");
+    setPhotos([]);
     setStatus("idle");
   }
 
@@ -194,6 +242,27 @@ export default function CapturePage() {
       <main className="flex-1 flex flex-col items-center justify-center gap-8 p-6">
         {status === "idle" && (
           <div className="flex flex-col items-center gap-8 w-full max-w-sm">
+            <div className="flex w-full p-1 rounded-full bg-white/5 border border-white/10">
+              {(
+                [
+                  { value: "video" as const, label: "Video" },
+                  { value: "photos" as const, label: "Foto" },
+                ]
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setCaptureMode(opt.value)}
+                  className={`flex-1 px-3 py-2 rounded-full text-sm font-medium transition-all ${
+                    captureMode === opt.value
+                      ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                      : "text-white/50 hover:text-white/80"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             <div className="flex flex-col items-center gap-3 w-full">
               <span className="text-xs uppercase tracking-wide text-white/40">Qualità ricostruzione</span>
               <div className="flex w-full p-1 rounded-full bg-white/5 border border-white/10">
@@ -216,28 +285,93 @@ export default function CapturePage() {
               </span>
             </div>
 
-            <label className="group flex flex-col items-center gap-4 cursor-pointer">
-              <span className="flex items-center justify-center w-24 h-24 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
-                <CameraIcon />
-              </span>
-              <span className="flex flex-col items-center gap-1">
-                <span className="text-base font-medium">Registra o scegli un video</span>
-                <span className="text-sm text-white/40">Tocca per aprire la fotocamera del telefono</span>
-              </span>
-              <input
-                type="file"
-                accept="video/*"
-                capture="environment"
-                className="hidden"
-                onChange={handleFileChange}
-              />
-            </label>
+            {captureMode === "video" ? (
+              <label className="group flex flex-col items-center gap-4 cursor-pointer">
+                <span className="flex items-center justify-center w-24 h-24 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
+                  <CameraIcon />
+                </span>
+                <span className="flex flex-col items-center gap-1">
+                  <span className="text-base font-medium">Registra o scegli un video</span>
+                  <span className="text-sm text-white/40">Tocca per aprire la fotocamera del telefono</span>
+                </span>
+                <input
+                  type="file"
+                  accept="video/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={handleVideoFileChange}
+                />
+              </label>
+            ) : (
+              <div className="flex flex-col items-center gap-4 w-full">
+                {photos.length > 0 && (
+                  <div className="grid grid-cols-4 gap-2 w-full">
+                    {photoUrls.map((url, i) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={i}
+                        src={url}
+                        alt={`Foto ${i + 1}`}
+                        className="aspect-square w-full object-cover rounded-lg border border-white/10"
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <label className="group flex flex-col items-center gap-3 cursor-pointer">
+                  <span className="flex items-center justify-center w-20 h-20 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
+                    <CameraIcon />
+                  </span>
+                  <span className="text-sm font-medium">Scatta foto ({photos.length})</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={handleAddPhoto}
+                  />
+                </label>
+
+                <p className="text-xs text-white/40 text-center">
+                  {photos.length < RECOMMENDED_PHOTOS
+                    ? `Consigliate almeno ${RECOMMENDED_PHOTOS} foto da angolazioni diverse, girando lentamente intorno all'oggetto`
+                    : "Buon numero di foto — puoi continuare a scattare o ricostruire ora"}
+                </p>
+
+                {photos.length > 0 && (
+                  <div className="flex gap-2 w-full">
+                    <button
+                      onClick={removeLastPhoto}
+                      className="flex-1 px-3 py-2 rounded-full text-sm font-medium bg-white/10 hover:bg-white/20 transition-colors"
+                    >
+                      Rimuovi ultima
+                    </button>
+                    <button
+                      onClick={() => setPhotos([])}
+                      className="flex-1 px-3 py-2 rounded-full text-sm font-medium bg-white/10 hover:bg-white/20 transition-colors"
+                    >
+                      Ricomincia
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  onClick={handleSubmitPhotos}
+                  disabled={photos.length < MIN_PHOTOS_TO_SUBMIT}
+                  className="w-full px-4 py-3 rounded-full text-sm font-medium bg-indigo-500 hover:bg-indigo-400 disabled:bg-white/10 disabled:text-white/30 disabled:cursor-not-allowed transition-colors"
+                >
+                  {photos.length < MIN_PHOTOS_TO_SUBMIT
+                    ? `Servono almeno ${MIN_PHOTOS_TO_SUBMIT} foto`
+                    : `Ricostruisci con ${photos.length} foto`}
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {status === "uploading" && (
           <div className="flex flex-col items-center gap-3 w-full max-w-sm">
-            <p className="text-white/70">Caricamento video in corso…</p>
+            <p className="text-white/70">Caricamento in corso…</p>
             <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-400 transition-all duration-300"
