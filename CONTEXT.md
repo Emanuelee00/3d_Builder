@@ -34,6 +34,8 @@ webapp/                 Sito Next.js (viewer + capture da telefono)
   app/api/upload/        Riceve il video, lancia la pipeline Python come child process
   app/api/status/[id]/   Polling stato job (basato su file, non in-memory - vedi bug noti)
   app/api/models/        Elenca i modelli generati (per il selettore nella homepage)
+  app/models/[filename]/ Route dinamica che serve i .glb/.jsx generati (vedi bug #14 -
+                          niente file statico in public/, va letto da disco ad ogni richiesta)
   lib/jobs.ts            Gestione job: stato su disco in app/job-status/*.json
   components/            ModelViewer (Canvas R3F), ScannedModel (loader glb), CodePanel, Nav
 
@@ -127,6 +129,7 @@ Oggetti piccoli, trasparenti o riflettenti (es. occhiali) ricostruiscono male co
 11. **Nessun feedback durante l'upload del video**: `fetch()` non espone il progresso di upload. Risolto passando a `XMLHttpRequest` con `upload.onprogress` in `capture/page.tsx`.
 12. **Crash criptico e lento su overlap insufficiente tra le viste**: se troppo poche immagini si sovrappongono a sufficienza (video troppo veloce, o foto scattate con angolazioni troppo distanti), COLMAP registra solo 1-2 immagini su tutte quelle fornite, producendo una point cloud quasi vuota — la pipeline proseguiva comunque per 1-2 minuti fino a schiantarsi in modo criptico su OpenMVS (`TextureMesh: invalid PLY file`). Risolto con un controllo fail-fast in `sparse.py` (`_check_registration_quality`) subito dopo la ricostruzione sparsa: se le immagini registrate sono troppo poche (< 3 o < 25% del totale), solleva subito un errore comprensibile invece di continuare.
 13. **Errore mostrato all'utente poco informativo** ("Pipeline terminata con codice 1"): `lib/jobs.ts` ora cerca l'ultimo messaggio di eccezione Python (`RuntimeError`/`ValueError`/`Exception`) nel log e lo mostra al posto del codice di uscita nudo (`extractErrorMessage`).
+14. **Modello generato durante la sessione risulta 404 nel browser**: `jobs.ts` copia il `.glb` in `webapp/public/models/` a fine job, ma **Next.js 16 con Turbopack in produzione (`next start`) non sembra rileggere `public/` da disco ad ogni richiesta** — un file presente li' da prima dell'ultima build torna 200, uno aggiunto dopo (es. da un job appena completato) torna 404 (verificato anche in locale sul server via `curl`, quindi non e' cache del browser/tunnel). Dato che i modelli nascono in continuazione ben oltre l'ultima build, questo rompeva la visualizzazione di ogni job completato senza un rebuild nel mezzo. Risolto servendo `/models/<file>` con una route dinamica (`app/models/[filename]/route.ts`) che legge sempre da disco invece di affidarsi al file statico — stesso URL di prima (`modelUrl` in `lib/jobs.ts` invariato), quindi nessuna modifica al resto del frontend.
 
 ## Stato attuale
 
