@@ -28,7 +28,7 @@ app/                    Pipeline Python (video/foto -> mesh 3D)
 
 webapp/                 Sito Next.js (viewer + capture da telefono)
   app/page.tsx           Homepage: viewer 3D + pannello codice generato
-  app/capture/page.tsx   Pagina cattura da telefono (video o, in arrivo, foto multiple)
+  app/capture/page.tsx   Pagina cattura da telefono: toggle Video / Foto multiple
   app/api/upload/        Riceve il video, lancia la pipeline Python come child process
   app/api/status/[id]/   Polling stato job (basato su file, non in-memory - vedi bug noti)
   app/api/models/        Elenca i modelli generati (per il selettore nella homepage)
@@ -94,13 +94,16 @@ Oggetti piccoli, trasparenti o riflettenti (es. occhiali) ricostruiscono male co
 9. **Barra di progresso sempre a 0%**: i marcatori di fase `[N/5]` sono stampati da Python con `print()`, ma quando lo stdout non è un TTY (spawn da Node) Python usa **buffering a blocchi** invece che a riga — i print restano bloccati nel buffer mentre l'output diretto di COLMAP/OpenMVS (che scrive sul file descriptor, bypassando il buffer Python) arriva subito. Risolto lanciando Python con `-u` (unbuffered) in `lib/jobs.ts`.
 10. **`WebGL context was lost` / pagina che sembra "non caricare"**: il rendering 3D (`ModelViewer.tsx`) può fallire su alcuni browser/ambienti (rendering software senza vera GPU, es. sessioni remote/VM). Mitigato con: `dpr` limitato, shadow map disattivata, `Environment` più leggera (`apartment` invece di `city`, bassa risoluzione), un listener su `webglcontextlost` che mostra un messaggio recuperabile invece di uno schermo nero, e un **error boundary React** attorno al `Canvas` (un errore di parsing/rendering non catturato da Suspense mandava in crash l'intera pagina).
 11. **Nessun feedback durante l'upload del video**: `fetch()` non espone il progresso di upload. Risolto passando a `XMLHttpRequest` con `upload.onprogress` in `capture/page.tsx`.
+12. **Crash criptico e lento su overlap insufficiente tra le viste**: se troppo poche immagini si sovrappongono a sufficienza (video troppo veloce, o foto scattate con angolazioni troppo distanti), COLMAP registra solo 1-2 immagini su tutte quelle fornite, producendo una point cloud quasi vuota — la pipeline proseguiva comunque per 1-2 minuti fino a schiantarsi in modo criptico su OpenMVS (`TextureMesh: invalid PLY file`). Risolto con un controllo fail-fast in `sparse.py` (`_check_registration_quality`) subito dopo la ricostruzione sparsa: se le immagini registrate sono troppo poche (< 3 o < 25% del totale), solleva subito un errore comprensibile invece di continuare.
+13. **Errore mostrato all'utente poco informativo** ("Pipeline terminata con codice 1"): `lib/jobs.ts` ora cerca l'ultimo messaggio di eccezione Python (`RuntimeError`/`ValueError`/`Exception`) nel log e lo mostra al posto del codice di uscita nudo (`extractErrorMessage`).
 
 ## Stato attuale
 
 - Deployato e testato su VM Oracle Cloud ARM64 con video reali girati da telefono (non solo simulati).
 - Flusso completo verificato: upload da webapp → elaborazione Python in background → rimozione sfondo → visualizzazione nel viewer 3D.
 - Buona qualità su oggetti opachi con texture; scarsa su oggetti piccoli/trasparenti/riflettenti (limite intrinseco, vedi sopra).
-- In arrivo: cattura tramite foto multiple scattate singolarmente (invece che estratte da un video) — probabilmente qualità migliore (niente motion blur, risoluzione nativa del telefono più alta, meno artefatti di compressione video).
+- **Cattura tramite foto multiple** implementata come alternativa al video (`captureMode` in `capture/page.tsx`): scatti singoli accumulati con anteprima, upload in batch, pipeline con `run_pipeline.py --images-dir <cartella>` (salta l'estrazione frame). Probabilmente qualità migliore del video: niente motion blur, risoluzione nativa del telefono più alta, meno artefatti di compressione. Stessa rimozione sfondo automatica di entrambe le modalità.
+- Fail-fast e messaggi di errore più chiari quando la ricostruzione non ha abbastanza sovrapposizione tra le viste (vedi bug #12/#13).
 
 ## Come far girare tutto in locale (sviluppo, Windows)
 
