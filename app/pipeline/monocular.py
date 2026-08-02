@@ -140,10 +140,74 @@ def _build_relief_mesh(
         faces = faces[:, ::-1]
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
+    # Senza questo, il bordo della sagoma e' uno spigolo vivo a spessore zero: visto
+    # di lato sembra un ritaglio di carta piatto invece che un rilievo solido. Aggiunge
+    # una piccola "parete" di spessore uniforme lungo tutto il contorno (non un foglio
+    # sospeso nel vuoto).
+    vertices, uv, faces = _add_rim(vertices, uv, faces)
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     material = trimesh.visual.material.PBRMaterial(baseColorTexture=texture_image)
     mesh.visual = trimesh.visual.texture.TextureVisuals(uv=uv, image=texture_image, material=material)
     mesh.vertex_normals  # forza il calcolo (altrimenti il materiale risulta "unlit")
     return mesh
+
+
+def _add_rim(
+    vertices: np.ndarray, uv: np.ndarray, faces: np.ndarray, rim_depth: float = 0.05
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Chiude il contorno aperto del rilievo con una parete di spessore uniforme.
+
+    Il rilievo di partenza e' una superficie singola (niente retro): il suo contorno
+    (dove la maschera taglia via lo sfondo) e' un bordo aperto a spessore zero. Qui si
+    trovano gli spigoli di quel bordo (quelli usati da un solo triangolo, non condiviso
+    tra due) e per ognuno si aggiunge un vertice "gemello" leggermente dietro (stessa
+    X/Y, Z spostata indietro di rim_depth rispetto a QUEL punto - non verso un'unica
+    base piatta comune: un oggetto come un mouse ha punti del contorno ad altezze molto
+    diverse, dalla cupola al piano d'appoggio, e una base condivisa creerebbe pareti a
+    "pettine" invece di un bordo sottile e uniforme). Non e' lo spessore vero di un
+    oggetto pieno (quello richiederebbe di conoscere anche il retro, che qui non esiste).
+    """
+    directed_edges = faces[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2)
+    edge_set = {(int(a), int(b)) for a, b in directed_edges}
+    boundary = np.array(
+        [(a, b) for a, b in directed_edges if (int(b), int(a)) not in edge_set]
+    )
+    if len(boundary) == 0:
+        return vertices, uv, faces  # bordo chiuso (non dovrebbe succedere qui), niente da fare
+
+    boundary_verts = np.unique(boundary.ravel())
+    back_of = -np.ones(len(vertices), dtype=np.int64)
+    back_of[boundary_verts] = np.arange(len(boundary_verts)) + len(vertices)
+
+    # Spessore fisso relativo a OGNI vertice del bordo (non un'unica base piatta
+    # globale): un oggetto come un mouse ha punti del contorno ad altezze molto
+    # diverse (in alto sulla cupola, in basso sul piano d'appoggio) - una base
+    # comune li collegherebbe tutti a distanze diversissime, creando pareti a
+    # "pettine" invece di un bordo sottile e uniforme.
+    back_vertices = vertices[boundary_verts].copy()
+    back_vertices[:, 2] -= rim_depth
+    back_uv = uv[boundary_verts]
+
+    a, b = boundary[:, 0], boundary[:, 1]
+    a_back, b_back = back_of[a], back_of[b]
+    wall_faces = np.concatenate(
+        [np.stack([a, b, a_back], axis=1), np.stack([b, b_back, a_back], axis=1)], axis=0
+    )
+
+    # Il verso di percorrenza del bordo (e quindi la vera direzione "verso l'esterno"
+    # della parete) dipende dalla forma della sagoma - invece di derivarlo a mano,
+    # si prova un verso e si controlla se le normali risultanti puntano lontano dal
+    # centro della sagoma (proiettato su XY); se puntano verso l'interno, si inverte.
+    all_vertices = np.concatenate([vertices, back_vertices], axis=0)
+    wall_normals = trimesh.Trimesh(vertices=all_vertices, faces=wall_faces, process=False).face_normals
+    outward_xy = all_vertices[wall_faces].mean(axis=1)[:, :2] - vertices[:, :2].mean(axis=0)
+    if (wall_normals[:, :2] * outward_xy).sum(axis=1).mean() < 0:
+        wall_faces = wall_faces[:, ::-1]
+
+    all_uv = np.concatenate([uv, back_uv], axis=0)
+    all_faces = np.concatenate([faces, wall_faces], axis=0)
+    return all_vertices, all_uv, all_faces
 
 
 def _grid_faces(width: int, height: int) -> np.ndarray:

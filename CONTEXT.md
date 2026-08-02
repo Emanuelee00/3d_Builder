@@ -87,15 +87,25 @@ SfM/MVS (COLMAP/OpenMVS non entrano in gioco):
    dell'immagine (heightfield); i vertici di sfondo vengono scartati. La foto
    originale (piena risoluzione, non quella ridotta usata per calcolare la
    griglia) diventa la texture via UV diretta.
-4. Risultato: pochi secondi totali (contro l'ora+ della pipeline multi-vista),
+4. `_add_rim()` chiude il contorno aperto (dove la maschera taglia via lo sfondo)
+   con una piccola parete di spessore uniforme (`rim_depth`, offset fisso dal
+   punto stesso, non da una base comune — un oggetto come un mouse ha punti del
+   contorno ad altezze molto diverse, una base condivisa creava pareti a "pettine").
+   Senza, il bordo era uno spigolo a spessore zero: visto di lato sembrava un
+   ritaglio di carta piatto invece che un rilievo solido (feedback reale: "fa un
+   po' schifo la generazione" → bordi/silhouette). Verificato solo numericamente
+   (nessun NaN, range Z del bordo coerente con l'offset atteso) — **non ancora
+   verificato a video** in un vero renderer (matplotlib.mplot3d usato per un primo
+   controllo si e' rivelato inaffidabile su mesh complesse, non fa vero z-buffering).
+5. Risultato: pochi secondi totali (contro l'ora+ della pipeline multi-vista),
    ma è **un bassorilievo, non un oggetto pieno** — visto da un'angolazione
    troppo diversa da quella originale si vede che dietro non c'è nulla. Non è
    un bug: è esattamente il compromesso implicito nel fare 3D da una sola foto
    senza multi-vista (vedi "Idea di partenza" sopra).
-5. CLI: `run_pipeline.py --single-image percorso/foto.jpg --job-name nome_job`
+6. CLI: `run_pipeline.py --single-image percorso/foto.jpg --job-name nome_job`
    (mutualmente esclusivo con `video`/`--images-dir`). Webapp: terza opzione
    "Foto singola" in `/capture` (niente selettore qualità, non si applica).
-6. `run_pipeline.py` stampa i propri marcatori `[1/2]`/`[2/2]` per questa
+7. `run_pipeline.py` stampa i propri marcatori `[1/2]`/`[2/2]` per questa
    modalità; `monocular.py` non stampa contatori propri per non confondere
    `progressFromLog()` nella webapp (regex generica su `[n/m]`, non più
    hardcoded su `/5`).
