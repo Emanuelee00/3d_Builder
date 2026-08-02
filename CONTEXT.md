@@ -6,7 +6,7 @@ Utility che trasforma un video (o foto multiple) in un modello 3D texturizzato, 
 
 Da una conversazione esplorativa: l'obiettivo iniziale era capire se fosse fattibile creare uno strumento che trasforma foto/video in codice Three.js strutturato. Conclusioni chiave di quella discussione:
 
-- **Foto singola → 3D**: non fattibile in modo affidabile senza AI (nessuna geometria ricavabile da un'unica immagine).
+- **Foto singola → 3D**: non fattibile in modo affidabile senza AI (nessuna geometria ricavabile da un'unica immagine) **per un modello completo** (con retro/lati). Rivisitato più avanti con uno scopo volutamente più modesto: un rilievo 2.5D solo del lato fotografato (vedi sezione dedicata sotto) — lì l'AI (depth monoculare) è accettata perché il prodotto non promette più un oggetto pieno.
 - **Video → 3D senza AI**: fattibile con fotogrammetria classica (Structure-from-Motion + Multi-View Stereo). Il video (o una serie di foto) risolve il problema di avere molte viste della stessa scena.
 - **Separazione in "componenti nominati"** (es. "questo è il tavolo", "questa è la sedia"): richiederebbe un modello di segmentazione AI, non implementato — il risultato attuale è **una singola mesh fusa**, non oggetti separati.
 - **Business**: mercato saturo di alternative gratuite (Polycam, Scaniverse, RealityScan). L'idea più promettente è una nicchia verticale con export web strutturato (es. arredamento/immobiliare) invece di competere sulla ricostruzione generica.
@@ -20,6 +20,8 @@ app/                    Pipeline Python (video/foto -> mesh 3D)
     sparse.py            pycolmap (o CLI colmap su ARM64): pose camere + point cloud sparsa (CPU)
     remove_background.py Segmentazione primo piano/sfondo per frame (rembg, CPU)
     dense.py             OpenMVS: point cloud densa (con maschere sfondo) -> mesh -> texture (CPU)
+    monocular.py          Alternativa da una sola foto: depth monoculare (AI, solo inferenza)
+                          -> rilievo 2.5D texturizzato (niente retro/lati, vedi sezione dedicata)
     finalize_mesh.py     Corregge il glb di OpenMVS (vedi bug noti sotto)
     codegen.py           Genera componente React Three Fiber + preview.html standalone
     run_pipeline.py      Orchestratore CLI end-to-end
@@ -28,7 +30,7 @@ app/                    Pipeline Python (video/foto -> mesh 3D)
 
 webapp/                 Sito Next.js (viewer + capture da telefono)
   app/page.tsx           Homepage: viewer 3D + pannello codice generato
-  app/capture/page.tsx   Pagina cattura da telefono: toggle Video / Foto multiple
+  app/capture/page.tsx   Pagina cattura da telefono: toggle Video / Foto multiple / Foto singola
   app/api/upload/        Riceve il video, lancia la pipeline Python come child process
   app/api/status/[id]/   Polling stato job (basato su file, non in-memory - vedi bug noti)
   app/api/models/        Elenca i modelli generati (per il selettore nella homepage)
@@ -67,6 +69,35 @@ Ogni scan rimuove automaticamente lo sfondo dalla ricostruzione finale (non è u
 4. `remove_background: bool = True` è un parametro di `run_dense_reconstruction()` — disattivabile se necessario.
 5. Limite noto: efficace su oggetti opachi con sfondo semplice; su oggetti piccoli/trasparenti/riflettenti (es. occhiali) il problema principale resta la ricostruzione stessa (vedi sotto), non la rimozione sfondo.
 
+## Rilievo 2.5D da foto singola (`monocular.py`)
+
+Terza modalità di input (oltre a video e foto multiple), pensata per quando serve solo
+"il lato fotografato" e non l'intero oggetto — niente multi-vista, quindi niente
+SfM/MVS (COLMAP/OpenMVS non entrano in gioco):
+
+1. Un modello di **stima depth monoculare** pre-addestrato (**Depth Anything V2
+   Small**, via `transformers`, solo inferenza — nessun training) assegna a ogni
+   pixel un valore di vicinanza relativo. Su CPU ARM64: ~6s per caricare i pesi la
+   prima volta, poi ~1-6s per immagine.
+2. `remove_background.py` (stesso rembg/u2netp del resto della pipeline) isola
+   l'oggetto dallo sfondo.
+3. La depth normalizzata sposta una griglia di vertici presa dai pixel
+   dell'immagine (heightfield); i vertici di sfondo vengono scartati. La foto
+   originale (piena risoluzione, non quella ridotta usata per calcolare la
+   griglia) diventa la texture via UV diretta.
+4. Risultato: pochi secondi totali (contro l'ora+ della pipeline multi-vista),
+   ma è **un bassorilievo, non un oggetto pieno** — visto da un'angolazione
+   troppo diversa da quella originale si vede che dietro non c'è nulla. Non è
+   un bug: è esattamente il compromesso implicito nel fare 3D da una sola foto
+   senza multi-vista (vedi "Idea di partenza" sopra).
+5. CLI: `run_pipeline.py --single-image percorso/foto.jpg --job-name nome_job`
+   (mutualmente esclusivo con `video`/`--images-dir`). Webapp: terza opzione
+   "Foto singola" in `/capture` (niente selettore qualità, non si applica).
+6. `run_pipeline.py` stampa i propri marcatori `[1/2]`/`[2/2]` per questa
+   modalità; `monocular.py` non stampa contatori propri per non confondere
+   `progressFromLog()` nella webapp (regex generica su `[n/m]`, non più
+   hardcoded su `/5`).
+
 ## Velocità: preset qualità legato alla risoluzione OpenMVS
 
 Il selettore "Qualità ricostruzione" in `/capture` (Veloce/Bilanciato/Dettagliato) sceglie sia il numero di frame estratti dal video sia il `--resolution-level` di `DensifyPointCloud` (fase più lenta della pipeline, `_resolution_level_for()` in `run_pipeline.py`):
@@ -104,6 +135,7 @@ Oggetti piccoli, trasparenti o riflettenti (es. occhiali) ricostruiscono male co
 - Buona qualità su oggetti opachi con texture; scarsa su oggetti piccoli/trasparenti/riflettenti (limite intrinseco, vedi sopra).
 - **Cattura tramite foto multiple** implementata come alternativa al video (`captureMode` in `capture/page.tsx`): scatti singoli accumulati con anteprima, upload in batch, pipeline con `run_pipeline.py --images-dir <cartella>` (salta l'estrazione frame). Probabilmente qualità migliore del video: niente motion blur, risoluzione nativa del telefono più alta, meno artefatti di compressione. Stessa rimozione sfondo automatica di entrambe le modalità.
 - Fail-fast e messaggi di errore più chiari quando la ricostruzione non ha abbastanza sovrapposizione tra le viste (vedi bug #12/#13).
+- **Rilievo 2.5D da foto singola** (`monocular.py`, terza modalità in `/capture`): testato end-to-end via API reale (`/api/upload` con un solo file `image`), non solo da CLI. Utile quando serve solo il lato fotografato in pochi secondi, non un oggetto pieno.
 
 ## Come far girare tutto in locale (sviluppo, Windows)
 
@@ -122,6 +154,9 @@ npm run dev
 ```bash
 # Pipeline da riga di comando
 ~/3D_visualizer/app/venv/bin/python3 -m app.pipeline.run_pipeline percorso/video.mp4 --job-name nome_job --frames 60
+
+# Rilievo 2.5D da una sola foto (nessun --frames, non si applica)
+~/3D_visualizer/app/venv/bin/python3 -m app.pipeline.run_pipeline --single-image percorso/foto.jpg --job-name nome_job
 
 # Dopo una modifica alla webapp (TypeScript/React): rebuild + restart pm2
 ~/rebuild_webapp.sh

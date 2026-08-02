@@ -36,8 +36,16 @@ def _check_registration_quality(num_registered: int, total_images: int) -> None:
     )
 
 
-def run_sparse_reconstruction(image_dir: Path, workspace_dir: Path) -> Path:
-    """SfM sparso: pose delle camere + point cloud sparsa. Gira su CPU."""
+def run_sparse_reconstruction(image_dir: Path, workspace_dir: Path, sequential: bool = True) -> Path:
+    """SfM sparso: pose delle camere + point cloud sparsa. Gira su CPU.
+
+    sequential: True per frame video (ordine = adiacenza spaziale, matcher sequenziale
+    molto piu' veloce di quello esaustivo). False per foto scattate singolarmente, dove
+    l'ordine di scatto non garantisce che due foto vicine nell'elenco siano vicine anche
+    nello spazio - il matcher esaustivo (ogni coppia possibile) trova molte piu' coppie
+    valide in quel caso, al costo di O(n^2) invece di O(n), accettabile per poche decine
+    di foto.
+    """
     database_path = workspace_dir / "database.db"
     sfm_path = workspace_dir / "sparse"
 
@@ -48,17 +56,16 @@ def run_sparse_reconstruction(image_dir: Path, workspace_dir: Path) -> Path:
     sfm_path.mkdir(parents=True)
 
     if pycolmap is not None:
-        return _run_with_pycolmap(image_dir, database_path, sfm_path)
-    return _run_with_cli(image_dir, database_path, sfm_path)
+        return _run_with_pycolmap(image_dir, database_path, sfm_path, sequential)
+    return _run_with_cli(image_dir, database_path, sfm_path, sequential)
 
 
-def _run_with_pycolmap(image_dir: Path, database_path: Path, sfm_path: Path) -> Path:
+def _run_with_pycolmap(image_dir: Path, database_path: Path, sfm_path: Path, sequential: bool) -> Path:
     pycolmap.extract_features(database_path, image_dir)
-    # I frame vengono da un video (sequenza ordinata), non da foto sparse: il matching
-    # esaustivo (ogni coppia possibile, O(n^2)) confronta anche frame lontanissimi tra loro
-    # che non condividono nulla. Il matcher sequenziale confronta solo frame vicini nel
-    # tempo (adiacenti nella sequenza) - stesso approccio raccomandato da COLMAP per video.
-    pycolmap.match_sequential(database_path)
+    if sequential:
+        pycolmap.match_sequential(database_path)
+    else:
+        pycolmap.match_exhaustive(database_path)
     reconstructions = pycolmap.incremental_mapping(database_path, image_dir, sfm_path)
 
     if not reconstructions:
@@ -73,7 +80,7 @@ def _run_with_pycolmap(image_dir: Path, database_path: Path, sfm_path: Path) -> 
     return sfm_path / str(best_idx)
 
 
-def _run_with_cli(image_dir: Path, database_path: Path, sfm_path: Path) -> Path:
+def _run_with_cli(image_dir: Path, database_path: Path, sfm_path: Path, sequential: bool) -> Path:
     # use_gpu=0: niente GPU/OpenGL su questo server headless (SiftGPU richiede un
     # contesto OpenGL, che fallisce senza display: "Check failed: context_.create()").
     # Forza il fallback CPU (VLFeat) per estrazione e matching delle feature SIFT.
@@ -83,19 +90,32 @@ def _run_with_cli(image_dir: Path, database_path: Path, sfm_path: Path) -> Path:
          "--SiftExtraction.use_gpu", "0"],
         check=True, env=_CLI_ENV,
     )
-    # sequential_matcher invece di exhaustive_matcher: i frame vengono da un video
-    # (sequenza ordinata), quindi confrontare solo frame vicini nel tempo e' sufficiente
-    # e molto piu' veloce di confrontare ogni coppia possibile (O(n^2)).
+    # sequential_matcher per i video (l'ordine dei frame e' anche adiacenza spaziale,
+    # molto piu' veloce di confrontare ogni coppia possibile). exhaustive_matcher per le
+    # foto: l'ordine di scatto non garantisce vicinanza spaziale tra scatti consecutivi,
+    # quindi serve confrontare tutte le coppie per trovare l'overlap che c'e' davvero.
+    matcher_cmd = "sequential_matcher" if sequential else "exhaustive_matcher"
     subprocess.run(
-        ["colmap", "sequential_matcher",
+        ["colmap", matcher_cmd,
          "--database_path", str(database_path),
          "--SiftMatching.use_gpu", "0"],
         check=True, env=_CLI_ENV,
     )
-    subprocess.run(
-        ["colmap", "mapper", "--database_path", str(database_path), "--image_path", str(image_dir), "--output_path", str(sfm_path)],
-        check=True, env=_CLI_ENV,
-    )
+    try:
+        subprocess.run(
+            ["colmap", "mapper", "--database_path", str(database_path), "--image_path", str(image_dir), "--output_path", str(sfm_path)],
+            check=True, env=_CLI_ENV,
+        )
+    except subprocess.CalledProcessError as e:
+        # Con overlap troppo scarso tra le immagini, "colmap mapper" non trova nemmeno
+        # una coppia iniziale valida e fallisce subito (way prima del controllo sotto
+        # su candidates/num_reg_images) - stesso messaggio comprensibile, non il
+        # CalledProcessError grezzo.
+        raise RuntimeError(
+            "Ricostruzione sparsa fallita: nessuna coppia di immagini con sovrapposizione "
+            "sufficiente. Riprova girando piu' lentamente intorno all'oggetto (video) o "
+            "scattando foto piu' ravvicinate tra loro, con buona sovrapposizione (foto)."
+        ) from e
 
     candidates = sorted(p for p in sfm_path.iterdir() if p.is_dir())
     if not candidates:

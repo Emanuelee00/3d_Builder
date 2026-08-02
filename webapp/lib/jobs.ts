@@ -18,11 +18,13 @@ export type JobStatus = {
   error?: string;
 };
 
-// Video (estratto in frame dalla pipeline) e foto (gia' pronte, uno scatto per
-// immagine) sono due modalita' di input alternative per la stessa pipeline.
+// Video (estratto in frame dalla pipeline), foto (gia' pronte, uno scatto per
+// immagine) e single-image (rilievo 2.5D da una sola foto, niente multi-vista)
+// sono tre modalita' di input alternative per la stessa pipeline.
 export type JobInput =
   | { kind: "video"; videoPath: string; frameCount: number }
-  | { kind: "photos"; imagesDir: string; frameCount: number };
+  | { kind: "photos"; imagesDir: string; frameCount: number }
+  | { kind: "single-image"; imagePath: string };
 
 function statusPath(jobId: string): string {
   return path.join(JOBS_DIR, `${jobId}.json`);
@@ -43,7 +45,9 @@ export function getJob(jobId: string): JobStatus | undefined {
 // recuperare l'ultimo messaggio di eccezione Python dal log per mostrare
 // qualcosa di comprensibile invece di un errore generico.
 function extractErrorMessage(log: string, code: number | null): string {
-  const matches = [...log.matchAll(/(?:RuntimeError|ValueError|Exception): (.+)/g)];
+  // Qualsiasi eccezione Python il cui nome finisce in "Error" o "Exception"
+  // (RuntimeError, ValueError, CalledProcessError, ecc.), non solo un elenco fisso.
+  const matches = [...log.matchAll(/^\w*(?:Error|Exception): (.+)$/gm)];
   if (matches.length > 0) {
     return matches[matches.length - 1][1].trim();
   }
@@ -56,7 +60,9 @@ export function startJob(jobId: string, input: JobInput): void {
   const pipelineArgs =
     input.kind === "video"
       ? [input.videoPath, "--job-name", jobId, "--frames", String(input.frameCount)]
-      : ["--images-dir", input.imagesDir, "--job-name", jobId, "--frames", String(input.frameCount)];
+      : input.kind === "photos"
+      ? ["--images-dir", input.imagesDir, "--job-name", jobId, "--frames", String(input.frameCount)]
+      : ["--single-image", input.imagePath, "--job-name", jobId];
 
   const child = spawn(PYTHON_EXE, ["-u", "-m", "app.pipeline.run_pipeline", ...pipelineArgs], {
     cwd: PROJECT_ROOT,

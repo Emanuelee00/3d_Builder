@@ -68,6 +68,11 @@ function Viewer({ modelPath }: { modelPath: string }) {
       camera={{ position: [2, 1.5, 2.5], fov: 45 }}
       shadows={false}
       dpr={[1, 1.5]}
+      // "demand" invece di renderizzare in continuazione ad ogni frame: su un
+      // renderer software/senza vera GPU (il caso qui) un loop di render continuo
+      // esaurisce il contesto WebGL dopo un po' (da qui i "context lost" ripetuti).
+      // In demand si renderizza solo quando qualcosa cambia davvero (drag, resize).
+      frameloop="demand"
       onCreated={handleCreated}
     >
       <color attach="background" args={['#1a1a1e']} />
@@ -79,7 +84,9 @@ function Viewer({ modelPath }: { modelPath: string }) {
         </Center>
         <Environment preset="apartment" resolution={128} />
       </Suspense>
-      <OrbitControls autoRotate autoRotateSpeed={0.6} enableDamping />
+      {/* Niente autoRotate: richiederebbe di invalidare il frame in continuazione,
+          vanificando "demand". Trascina per ruotare manualmente il modello. */}
+      <OrbitControls enableDamping />
     </Canvas>
   )
 }

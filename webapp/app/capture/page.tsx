@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ModelViewer } from "@/components/ModelViewer";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
-type CaptureMode = "video" | "photos";
+type CaptureMode = "video" | "photos" | "relief";
 
 // Se impostata (es. su Vercel), le richieste vanno al PC locale che esegue
 // davvero la pipeline (es. un URL ngrok). Vuota = usa le API di questo stesso
@@ -33,19 +33,21 @@ const FRAME_OPTIONS = [
   { value: 90, label: "Dettagliato", hint: "più lento" },
 ] as const;
 
-// Sotto questa soglia la ricostruzione (SfM) ha troppe poche viste sovrapposte
-// per avere buone probabilita' di riuscita; sopra RECOMMENDED_PHOTOS la qualita'
-// tipicamente non migliora molto oltre.
-const MIN_PHOTOS_TO_SUBMIT = 5;
-const RECOMMENDED_PHOTOS = 20;
+// Sotto questa soglia la ricostruzione (SfM) quasi certamente fallisce per overlap
+// insufficiente tra le viste (verificato: con 6 foto solo 2 venivano registrate anche
+// con matching esaustivo) - meglio non far partire un tentativo gia' condannato.
+// Sopra RECOMMENDED_PHOTOS la qualita' tipicamente non migliora molto oltre.
+const MIN_PHOTOS_TO_SUBMIT = 15;
+const RECOMMENDED_PHOTOS = 25;
 
-// La pipeline stampa "[N/5] descrizione fase" per ognuno dei 5 passaggi: la usiamo
-// per stimare una percentuale di avanzamento senza dover instrumentare il Python.
+// La pipeline stampa "[N/M] descrizione fase" per ogni passaggio (M varia in base
+// alla modalita': 5 per video/foto multiple, 2 per il rilievo da foto singola) -
+// la usiamo per stimare una percentuale di avanzamento senza instrumentare il Python.
 function progressFromLog(log: string): number {
-  const matches = [...log.matchAll(/\[(\d)\/5\]/g)];
+  const matches = [...log.matchAll(/\[(\d+)\/(\d+)\]/g)];
   if (matches.length === 0) return 0;
-  const lastStep = Number(matches[matches.length - 1][1]);
-  return Math.min(100, Math.round((lastStep / 5) * 100));
+  const [, step, total] = matches[matches.length - 1];
+  return Math.min(100, Math.round((Number(step) / Number(total)) * 100));
 }
 
 function CameraIcon() {
@@ -68,7 +70,12 @@ export default function CapturePage() {
   const [log, setLog] = useState("");
   const [frameCount, setFrameCount] = useState<number>(60);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Riprende un job già in corso (o già concluso) se navighi via e torni indietro,
   // invece di perdere lo stato e dover ricaricare tutto da capo.
@@ -117,6 +124,66 @@ export default function CapturePage() {
       urls.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [photos]);
+
+  // Collega lo stream della fotocamera al <video> non appena la vista live si apre,
+  // e ferma sempre lo stream quando il componente si smonta (evita che la fotocamera
+  // resti "accesa" in background dopo aver lasciato la pagina).
+  useEffect(() => {
+    if (cameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [cameraActive]);
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  // Fotocamera live in pagina (richiede HTTPS): apri l'inquadratura una volta e scatta
+  // piu' foto di seguito con un pulsante, senza dover riaprire l'app fotocamera del
+  // telefono ad ogni scatto come con l'input file nativo.
+  async function openCamera() {
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraActive(true);
+    } catch {
+      setCameraError(
+        "Impossibile accedere alla fotocamera del browser. Usa il pulsante qui sotto per scattare con l'app fotocamera del telefono."
+      );
+    }
+  }
+
+  function closeCamera() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setCameraActive(false);
+  }
+
+  function captureFrame() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.videoWidth === 0) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const file = new File([blob], `photo_${Date.now()}.jpg`, { type: "image/jpeg" });
+        setPhotos((prev) => [...prev, file]);
+      },
+      "image/jpeg",
+      0.9
+    );
+  }
 
   function handleAddPhoto(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -174,6 +241,18 @@ export default function CapturePage() {
     });
   }
 
+  // Rilievo 2.5D da una sola foto: niente multi-vista, quindi niente frameCount
+  // (il preset qualita' non si applica a questa modalita').
+  function handleReliefFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    uploadAndStart(() => {
+      const formData = new FormData();
+      formData.append("image", file);
+      return formData;
+    });
+  }
+
   function handleSubmitPhotos() {
     if (photos.length < MIN_PHOTOS_TO_SUBMIT) return;
     uploadAndStart(() => {
@@ -220,6 +299,41 @@ export default function CapturePage() {
 
   const progress = progressFromLog(log);
 
+  if (cameraActive) {
+    return (
+      <div className="fixed inset-0 z-50 bg-black flex flex-col">
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <video ref={videoRef} autoPlay playsInline muted className="flex-1 w-full h-full object-cover" />
+        <canvas ref={canvasRef} className="hidden" />
+
+        {photoUrls.length > 0 && (
+          <div className="absolute top-4 left-4 flex gap-2 overflow-x-auto max-w-[80%]">
+            {photoUrls.slice(-5).map((url, i) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img key={i} src={url} alt="" className="w-12 h-12 object-cover rounded-lg border-2 border-white/60" />
+            ))}
+          </div>
+        )}
+
+        <div className="p-6 pb-10 flex items-center justify-between bg-gradient-to-t from-black to-transparent">
+          <span className="text-white text-sm font-medium w-16">{photos.length} foto</span>
+          <button
+            onClick={captureFrame}
+            aria-label="Scatta foto"
+            className="w-18 h-18 rounded-full bg-white border-4 border-white/40 active:scale-90 transition-transform shadow-xl"
+            style={{ width: 72, height: 72 }}
+          />
+          <button
+            onClick={closeCamera}
+            className="w-16 px-3 py-2 rounded-full text-sm font-medium bg-white/15 hover:bg-white/25 text-white transition-colors"
+          >
+            Fine
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col flex-1 text-white">
       <header className="px-6 py-4 border-b border-white/10 flex items-start justify-between gap-4">
@@ -247,6 +361,7 @@ export default function CapturePage() {
                 [
                   { value: "video" as const, label: "Video" },
                   { value: "photos" as const, label: "Foto" },
+                  { value: "relief" as const, label: "Foto singola" },
                 ]
               ).map((opt) => (
                 <button
@@ -263,27 +378,29 @@ export default function CapturePage() {
               ))}
             </div>
 
-            <div className="flex flex-col items-center gap-3 w-full">
-              <span className="text-xs uppercase tracking-wide text-white/40">Qualità ricostruzione</span>
-              <div className="flex w-full p-1 rounded-full bg-white/5 border border-white/10">
-                {FRAME_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setFrameCount(opt.value)}
-                    className={`flex-1 px-3 py-2 rounded-full text-sm font-medium transition-all ${
-                      frameCount === opt.value
-                        ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
-                        : "text-white/50 hover:text-white/80"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+            {captureMode !== "relief" && (
+              <div className="flex flex-col items-center gap-3 w-full">
+                <span className="text-xs uppercase tracking-wide text-white/40">Qualità ricostruzione</span>
+                <div className="flex w-full p-1 rounded-full bg-white/5 border border-white/10">
+                  {FRAME_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setFrameCount(opt.value)}
+                      className={`flex-1 px-3 py-2 rounded-full text-sm font-medium transition-all ${
+                        frameCount === opt.value
+                          ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                          : "text-white/50 hover:text-white/80"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-xs text-white/40">
+                  {FRAME_OPTIONS.find((o) => o.value === frameCount)?.hint}
+                </span>
               </div>
-              <span className="text-xs text-white/40">
-                {FRAME_OPTIONS.find((o) => o.value === frameCount)?.hint}
-              </span>
-            </div>
+            )}
 
             {captureMode === "video" ? (
               <label className="group flex flex-col items-center gap-4 cursor-pointer">
@@ -302,6 +419,27 @@ export default function CapturePage() {
                   onChange={handleVideoFileChange}
                 />
               </label>
+            ) : captureMode === "relief" ? (
+              <label className="group flex flex-col items-center gap-4 cursor-pointer">
+                <span className="flex items-center justify-center w-24 h-24 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
+                  <CameraIcon />
+                </span>
+                <span className="flex flex-col items-center gap-1">
+                  <span className="text-base font-medium">Scatta o scegli una foto</span>
+                  <span className="text-sm text-white/40">Tocca per aprire la fotocamera del telefono</span>
+                </span>
+                <span className="text-xs text-white/40 text-center max-w-xs">
+                  Genera un rilievo solo del lato fotografato (niente retro/lati), pronto in
+                  pochi secondi — non l&apos;intero oggetto come video/foto multiple
+                </span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={handleReliefFileChange}
+                />
+              </label>
             ) : (
               <div className="flex flex-col items-center gap-4 w-full">
                 {photos.length > 0 && (
@@ -318,11 +456,21 @@ export default function CapturePage() {
                   </div>
                 )}
 
-                <label className="group flex flex-col items-center gap-3 cursor-pointer">
+                <button
+                  onClick={openCamera}
+                  className="group flex flex-col items-center gap-3 cursor-pointer"
+                >
                   <span className="flex items-center justify-center w-20 h-20 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
                     <CameraIcon />
                   </span>
-                  <span className="text-sm font-medium">Scatta foto ({photos.length})</span>
+                  <span className="text-sm font-medium">Apri fotocamera ({photos.length})</span>
+                  <span className="text-xs text-white/40">Scatti multipli senza uscire dalla pagina</span>
+                </button>
+
+                {cameraError && <p className="text-xs text-amber-400 text-center max-w-xs">{cameraError}</p>}
+
+                <label className="text-xs text-white/40 underline cursor-pointer hover:text-white/60">
+                  oppure usa l&apos;app fotocamera del telefono
                   <input
                     type="file"
                     accept="image/*"
@@ -334,7 +482,7 @@ export default function CapturePage() {
 
                 <p className="text-xs text-white/40 text-center">
                   {photos.length < RECOMMENDED_PHOTOS
-                    ? `Consigliate almeno ${RECOMMENDED_PHOTOS} foto da angolazioni diverse, girando lentamente intorno all'oggetto`
+                    ? `Consigliate almeno ${RECOMMENDED_PHOTOS} foto: passi piccoli tra uno scatto e l'altro (ogni foto deve sovrapporsi molto alla precedente), un giro completo intorno all'oggetto`
                     : "Buon numero di foto — puoi continuare a scattare o ricostruire ora"}
                 </p>
 

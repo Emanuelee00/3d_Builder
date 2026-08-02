@@ -7,6 +7,7 @@ from .config import OUTPUT_ROOT
 from .dense import run_dense_reconstruction
 from .extract_frames import extract_frames
 from .finalize_mesh import finalize_glb
+from .monocular import run_monocular_reconstruction
 from .sparse import run_sparse_reconstruction
 
 
@@ -26,15 +27,33 @@ def run(
     job_name: str | None = None,
     target_frame_count: int = 60,
     images_dir: Path | None = None,
+    single_image: Path | None = None,
 ) -> Path:
-    """video_path (estrazione frame) e images_dir (foto gia' pronte, una per scatto)
-    sono alternativi tra loro: specificare esattamente uno dei due."""
-    if (video_path is None) == (images_dir is None):
-        raise ValueError("Specificare esattamente uno tra video_path e images_dir")
+    """video_path (estrazione frame), images_dir (foto gia' pronte, una per scatto) e
+    single_image (rilievo 2.5D da una sola foto, niente multi-vista) sono alternativi
+    tra loro: specificare esattamente uno dei tre."""
+    modes_specified = sum(m is not None for m in (video_path, images_dir, single_image))
+    if modes_specified != 1:
+        raise ValueError("Specificare esattamente uno tra video_path, images_dir e single_image")
 
     job_name = job_name or f"job_{int(time.time())}"
     workspace_dir = OUTPUT_ROOT / job_name
     web_dir = workspace_dir / "web"
+
+    if single_image is not None:
+        # Nessuna multi-vista: una rete di stima depth monoculare (solo inferenza)
+        # sostituisce interamente SfM/MVS. Vedi monocular.py per i limiti (niente
+        # retro/lati, e' un rilievo 2.5D non un oggetto pieno).
+        print("[1/2] Rilievo 2.5D da singola immagine (stima depth monoculare, CPU)")
+        glb_path = run_monocular_reconstruction(single_image, workspace_dir)
+
+        print("[2/2] Generazione componente React Three Fiber + anteprima HTML")
+        component_path = generate_r3f_component(glb_path, web_dir)
+        preview_path = generate_preview_html(glb_path.name, web_dir)
+
+        print(f"\nFatto. Componente generato in: {component_path}")
+        print(f"Anteprima (apri nel browser via server locale): {preview_path}")
+        return component_path
 
     if video_path is not None:
         images_dir_final = workspace_dir / "images"
@@ -46,7 +65,11 @@ def run(
         print(f"[1/5] Uso {n_photos} foto gia' pronte da {images_dir_final} (nessuna estrazione da video)")
 
     print("[2/5] Ricostruzione sparsa (pycolmap, CPU)")
-    sparse_model_path = run_sparse_reconstruction(images_dir_final, workspace_dir)
+    # Video: l'ordine dei frame e' anche adiacenza spaziale (matcher sequenziale, veloce).
+    # Foto: l'ordine di scatto non lo garantisce (matcher esaustivo, piu' robusto).
+    sparse_model_path = run_sparse_reconstruction(
+        images_dir_final, workspace_dir, sequential=(video_path is not None)
+    )
 
     resolution_level = _resolution_level_for(target_frame_count)
     print(f"[3/5] Ricostruzione densa + mesh + texture (OpenMVS, CPU, resolution-level={resolution_level})")
@@ -76,6 +99,11 @@ def main() -> None:
         "--images-dir", type=Path, default=None,
         help="Cartella con foto gia' pronte (una per scatto), alternativa al video",
     )
+    parser.add_argument(
+        "--single-image", type=Path, default=None,
+        help="Una sola foto: genera un rilievo 2.5D (depth monoculare, niente retro/lati) "
+        "invece della ricostruzione multi-vista completa. Alternativa a video/--images-dir.",
+    )
     parser.add_argument("--job-name", type=str, default=None, help="Nome della cartella di output")
     parser.add_argument(
         "--frames", type=int, default=60,
@@ -84,14 +112,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if (args.video is None) == (args.images_dir is None):
-        parser.error("specificare esattamente uno tra 'video' e --images-dir")
+    modes_specified = sum(m is not None for m in (args.video, args.images_dir, args.single_image))
+    if modes_specified != 1:
+        parser.error("specificare esattamente uno tra 'video', --images-dir e --single-image")
 
     run(
         video_path=args.video,
         job_name=args.job_name,
         target_frame_count=args.frames,
         images_dir=args.images_dir,
+        single_image=args.single_image,
     )
 
 
