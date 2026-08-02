@@ -3,7 +3,10 @@ import fs from "fs";
 import path from "path";
 
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
-const PYTHON_EXE = path.join(PROJECT_ROOT, "app", "venv", "Scripts", "python.exe");
+const PYTHON_EXE =
+  process.platform === "win32"
+    ? path.join(PROJECT_ROOT, "app", "venv", "Scripts", "python.exe")
+    : path.join(PROJECT_ROOT, "app", "venv", "bin", "python");
 const OUTPUT_ROOT = path.join(PROJECT_ROOT, "app", "output");
 const PUBLIC_MODELS_DIR = path.join(process.cwd(), "public", "models");
 const JOBS_DIR = path.join(PROJECT_ROOT, "app", "job-status");
@@ -30,12 +33,12 @@ export function getJob(jobId: string): JobStatus | undefined {
   return JSON.parse(fs.readFileSync(file, "utf-8"));
 }
 
-export function startJob(jobId: string, videoPath: string): void {
+export function startJob(jobId: string, videoPath: string, frameCount: number): void {
   writeJob(jobId, { status: "processing", log: "" });
 
   const child = spawn(
     PYTHON_EXE,
-    ["-m", "app.pipeline.run_pipeline", videoPath, "--job-name", jobId],
+    ["-u", "-m", "app.pipeline.run_pipeline", videoPath, "--job-name", jobId, "--frames", String(frameCount)],
     { cwd: PROJECT_ROOT }
   );
 
@@ -70,6 +73,11 @@ export function startJob(jobId: string, videoPath: string): void {
     fs.mkdirSync(PUBLIC_MODELS_DIR, { recursive: true });
     const destGlb = path.join(PUBLIC_MODELS_DIR, `${jobId}.glb`);
     fs.copyFileSync(generatedGlb, destGlb);
+
+    const generatedJsx = path.join(OUTPUT_ROOT, jobId, "web", "ScannedModel.jsx");
+    if (fs.existsSync(generatedJsx)) {
+      fs.copyFileSync(generatedJsx, path.join(PUBLIC_MODELS_DIR, `${jobId}.jsx`));
+    }
 
     writeJob(jobId, { ...job, status: "done", modelUrl: `/models/${jobId}.glb` });
   });

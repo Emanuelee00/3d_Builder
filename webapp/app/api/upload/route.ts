@@ -20,6 +20,9 @@ export async function POST(req: NextRequest) {
     return withCors(NextResponse.json({ error: "Nessun video ricevuto" }, { status: 400 }));
   }
 
+  const requestedFrames = Number(formData.get("frameCount"));
+  const frameCount = [30, 60, 90].includes(requestedFrames) ? requestedFrames : 60;
+
   const jobId = randomUUID();
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   const videoPath = path.join(UPLOADS_DIR, `${jobId}.mp4`);
@@ -27,7 +30,7 @@ export async function POST(req: NextRequest) {
   const buffer = Buffer.from(await file.arrayBuffer());
   fs.writeFileSync(videoPath, buffer);
 
-  startJob(jobId, videoPath);
+  startJob(jobId, videoPath, frameCount);
 
   return withCors(NextResponse.json({ jobId }));
 }

@@ -10,6 +10,17 @@ from .finalize_mesh import finalize_glb
 from .sparse import run_sparse_reconstruction
 
 
+# Lega il preset di qualita' gia' scelto in UI (che sceglie il numero di frame) anche
+# al resolution-level di OpenMVS: la fase densa (depth-map su ogni frame) e' quella piu'
+# lenta della pipeline, quindi "Veloce" deve alleggerire anche quella, non solo i frame.
+def _resolution_level_for(target_frame_count: int) -> int:
+    if target_frame_count <= 30:
+        return 2  # immagini a 1/4 risoluzione: molto piu' veloce, meno dettaglio
+    if target_frame_count <= 60:
+        return 1  # default OpenMVS: meta' risoluzione
+    return 0  # risoluzione piena: piu' lento, massimo dettaglio
+
+
 def run(video_path: Path, job_name: str | None = None, target_frame_count: int = 60) -> Path:
     job_name = job_name or f"job_{int(time.time())}"
     workspace_dir = OUTPUT_ROOT / job_name
@@ -22,8 +33,11 @@ def run(video_path: Path, job_name: str | None = None, target_frame_count: int =
     print("[2/5] Ricostruzione sparsa (pycolmap, CPU)")
     sparse_model_path = run_sparse_reconstruction(images_dir, workspace_dir)
 
-    print("[3/5] Ricostruzione densa + mesh + texture (OpenMVS, CPU)")
-    raw_glb_path = run_dense_reconstruction(images_dir, sparse_model_path, workspace_dir)
+    resolution_level = _resolution_level_for(target_frame_count)
+    print(f"[3/5] Ricostruzione densa + mesh + texture (OpenMVS, CPU, resolution-level={resolution_level})")
+    raw_glb_path = run_dense_reconstruction(
+        images_dir, sparse_model_path, workspace_dir, resolution_level=resolution_level
+    )
 
     print("[4/5] Correzione glb (texture incorporata + normali)")
     glb_path = finalize_glb(raw_glb_path, workspace_dir / "scene_final.glb")

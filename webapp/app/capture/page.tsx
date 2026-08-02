@@ -10,34 +10,140 @@ type Status = "idle" | "uploading" | "processing" | "done" | "error";
 // sito (comportamento di sviluppo in locale).
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
+const ACTIVE_JOB_KEY = "3dbuilder_active_job";
+
+// localStorage puo' lanciare un'eccezione (non limitarsi a fallire) in alcune modalita'
+// browser (es. Safari in navigazione privata, o impostazioni privacy restrittive) - senza
+// protezione questo mandava in crash l'intera pagina (schermata bianca) al primo avvio.
+function safeStorage() {
+  try {
+    const testKey = "__storage_test__";
+    window.localStorage.setItem(testKey, "1");
+    window.localStorage.removeItem(testKey);
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+const FRAME_OPTIONS = [
+  { value: 30, label: "Veloce", hint: "meno dettaglio" },
+  { value: 60, label: "Bilanciato", hint: "predefinito" },
+  { value: 90, label: "Dettagliato", hint: "più lento" },
+] as const;
+
+// La pipeline stampa "[N/5] descrizione fase" per ognuno dei 5 passaggi: la usiamo
+// per stimare una percentuale di avanzamento senza dover instrumentare il Python.
+function progressFromLog(log: string): number {
+  const matches = [...log.matchAll(/\[(\d)\/5\]/g)];
+  if (matches.length === 0) return 0;
+  const lastStep = Number(matches[matches.length - 1][1]);
+  return Math.min(100, Math.round((lastStep / 5) * 100));
+}
+
+function CameraIcon() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" strokeLinejoin="round" />
+      <circle cx="12" cy="13" r="3.5" />
+    </svg>
+  );
+}
+
 export default function CapturePage() {
   const [status, setStatus] = useState<Status>("idle");
   const [jobId, setJobId] = useState<string | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [log, setLog] = useState("");
+  const [frameCount, setFrameCount] = useState<number>(60);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  // Riprende un job già in corso (o già concluso) se navighi via e torni indietro,
+  // invece di perdere lo stato e dover ricaricare tutto da capo.
+  useEffect(() => {
+    const storage = safeStorage();
+    const savedJobId = storage?.getItem(ACTIVE_JOB_KEY);
+    if (!savedJobId) return;
+
+    fetch(`${API_BASE}/api/status/${savedJobId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) {
+          setJobId(savedJobId);
+          applyStatus(data);
+        } else {
+          // Il job salvato non esiste più lato server (es. riavvio, pulizia stato):
+          // niente da riprendere, torna alla schermata di partenza invece di
+          // restare bloccati per sempre su "processing".
+          storage?.removeItem(ACTIVE_JOB_KEY);
+        }
+      })
+      .catch(() => {
+        storage?.removeItem(ACTIVE_JOB_KEY);
+      });
+  }, []);
+
+  function applyStatus(data: { status: Status; log?: string; modelUrl?: string; error?: string }) {
+    setLog(data.log ?? "");
+    if (data.status === "done" && data.modelUrl) {
+      setModelUrl(`${API_BASE}${data.modelUrl}`);
+      setStatus("done");
+    } else if (data.status === "error") {
+      setErrorMsg(data.error ?? "Errore sconosciuto");
+      setStatus("error");
+    } else {
+      setStatus("processing");
+    }
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setStatus("uploading");
+    setUploadProgress(0);
     setErrorMsg(null);
 
     const formData = new FormData();
     formData.append("video", file);
+    formData.append("frameCount", String(frameCount));
 
-    try {
-      const res = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: formData });
-      if (!res.ok) throw new Error("Upload fallito");
-      const data = await res.json();
+    // fetch() non espone il progresso di upload: serve XMLHttpRequest per
+    // sapere quanti byte del video sono stati effettivamente inviati.
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener("progress", (ev) => {
+      if (ev.lengthComputable) {
+        setUploadProgress(Math.round((ev.loaded / ev.total) * 100));
+      }
+    });
+    xhr.addEventListener("load", () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        setStatus("error");
+        setErrorMsg("Errore durante il caricamento del video");
+        return;
+      }
+      const data = JSON.parse(xhr.responseText);
+      safeStorage()?.setItem(ACTIVE_JOB_KEY, data.jobId);
       setJobId(data.jobId);
       setStatus("processing");
-    } catch {
+    });
+    xhr.addEventListener("error", () => {
       setStatus("error");
       setErrorMsg("Errore durante il caricamento del video");
-    }
+    });
+    xhr.open("POST", `${API_BASE}/api/upload`);
+    xhr.send(formData);
+  }
+
+  function startNewScan() {
+    safeStorage()?.removeItem(ACTIVE_JOB_KEY);
+    setJobId(null);
+    setModelUrl(null);
+    setErrorMsg(null);
+    setLog("");
+    setStatus("idle");
   }
 
   useEffect(() => {
@@ -45,17 +151,16 @@ export default function CapturePage() {
 
     pollRef.current = setInterval(async () => {
       const res = await fetch(`${API_BASE}/api/status/${jobId}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setLog(data.log ?? "");
-
-      if (data.status === "done") {
-        setModelUrl(`${API_BASE}${data.modelUrl}`);
-        setStatus("done");
+      if (!res.ok) {
+        // Il job e' sparito lato server a meta' polling: non restare bloccati
+        // in "processing" per sempre, torna alla schermata di partenza.
         if (pollRef.current) clearInterval(pollRef.current);
-      } else if (data.status === "error") {
-        setErrorMsg(data.error ?? "Errore sconosciuto");
-        setStatus("error");
+        startNewScan();
+        return;
+      }
+      const data = await res.json();
+      applyStatus(data);
+      if (data.status === "done" || data.status === "error") {
         if (pollRef.current) clearInterval(pollRef.current);
       }
     }, 3000);
@@ -65,49 +170,111 @@ export default function CapturePage() {
     };
   }, [status, jobId]);
 
+  const progress = progressFromLog(log);
+
   return (
-    <div className="flex flex-col min-h-screen bg-[#09090b] text-white">
-      <header className="px-6 py-4 border-b border-white/10">
-        <h1 className="text-lg font-semibold">Registra e ricostruisci in 3D</h1>
-        <p className="text-sm text-white/50">
-          Gira lentamente intorno all&apos;oggetto mentre registri, poi carica il video
-        </p>
+    <div className="flex flex-col flex-1 text-white">
+      <header className="px-6 py-4 border-b border-white/10 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-semibold">Registra e ricostruisci in 3D</h1>
+          <p className="text-sm text-white/50">
+            Gira lentamente intorno all&apos;oggetto mentre registri, poi carica il video
+          </p>
+        </div>
+        {(status === "done" || status === "error" || status === "processing") && (
+          <button
+            onClick={startNewScan}
+            className="shrink-0 px-4 py-2 rounded-full text-sm font-medium bg-white/10 hover:bg-white/20 transition-colors"
+          >
+            {status === "processing" ? "Annulla / nuovo scan" : "Nuovo scan"}
+          </button>
+        )}
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-center gap-6 p-6">
+      <main className="flex-1 flex flex-col items-center justify-center gap-8 p-6">
         {status === "idle" && (
-          <label className="flex flex-col items-center gap-3 px-8 py-6 rounded-lg border border-dashed border-white/30 cursor-pointer hover:border-white/60 transition-colors">
-            <span className="text-base font-medium">Registra o scegli un video</span>
-            <span className="text-sm text-white/50">Tocca per aprire la fotocamera del telefono</span>
-            <input
-              type="file"
-              accept="video/*"
-              capture="environment"
-              className="hidden"
-              onChange={handleFileChange}
-            />
-          </label>
+          <div className="flex flex-col items-center gap-8 w-full max-w-sm">
+            <div className="flex flex-col items-center gap-3 w-full">
+              <span className="text-xs uppercase tracking-wide text-white/40">Qualità ricostruzione</span>
+              <div className="flex w-full p-1 rounded-full bg-white/5 border border-white/10">
+                {FRAME_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setFrameCount(opt.value)}
+                    className={`flex-1 px-3 py-2 rounded-full text-sm font-medium transition-all ${
+                      frameCount === opt.value
+                        ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                        : "text-white/50 hover:text-white/80"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-white/40">
+                {FRAME_OPTIONS.find((o) => o.value === frameCount)?.hint}
+              </span>
+            </div>
+
+            <label className="group flex flex-col items-center gap-4 cursor-pointer">
+              <span className="flex items-center justify-center w-24 h-24 rounded-full bg-indigo-500 group-hover:bg-indigo-400 group-active:scale-95 transition-all shadow-xl shadow-indigo-500/30">
+                <CameraIcon />
+              </span>
+              <span className="flex flex-col items-center gap-1">
+                <span className="text-base font-medium">Registra o scegli un video</span>
+                <span className="text-sm text-white/40">Tocca per aprire la fotocamera del telefono</span>
+              </span>
+              <input
+                type="file"
+                accept="video/*"
+                capture="environment"
+                className="hidden"
+                onChange={handleFileChange}
+              />
+            </label>
+          </div>
         )}
 
-        {status === "uploading" && <p className="text-white/70">Caricamento video in corso…</p>}
+        {status === "uploading" && (
+          <div className="flex flex-col items-center gap-3 w-full max-w-sm">
+            <p className="text-white/70">Caricamento video in corso…</p>
+            <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-400 transition-all duration-300"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+            <span className="text-xs text-white/40">{uploadProgress}%</span>
+          </div>
+        )}
 
         {status === "processing" && (
           <div className="flex flex-col items-center gap-3 w-full max-w-lg">
-            <p className="text-white/70">
-              Ricostruzione 3D in corso (può richiedere qualche minuto)…
+            <p className="text-white/70 text-center">
+              Ricostruzione 3D in corso (può richiedere qualche minuto)… puoi cambiare pagina,
+              continua in background.
             </p>
-            <pre className="text-xs text-white/40 bg-black/40 rounded p-3 max-h-40 overflow-auto w-full whitespace-pre-wrap">
+            <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-400 transition-all duration-500"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <span className="text-xs text-white/40">{progress}%</span>
+            <pre className="text-xs text-white/40 bg-black/40 rounded-lg p-3 max-h-40 overflow-auto w-full whitespace-pre-wrap">
               {log.slice(-1500)}
             </pre>
           </div>
         )}
 
         {status === "error" && (
-          <p className="text-red-400">Errore: {errorMsg}</p>
+          <p className="text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
+            Errore: {errorMsg}
+          </p>
         )}
 
         {status === "done" && modelUrl && (
-          <div className="w-full max-w-2xl h-[70vh] rounded-lg overflow-hidden border border-white/10">
+          <div className="w-full max-w-2xl h-[70vh] rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
             <ModelViewer modelPath={modelUrl} />
           </div>
         )}
